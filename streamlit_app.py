@@ -1,5 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
+from google.generativeai import types
+from google.api_core.exceptions import APIError
 import os
 import PyPDF2
 import pandas as pd
@@ -265,19 +267,16 @@ def parse_code(full_response: str) -> dict[str, str]:
 # --- END of Ported Logic ---
 
 
-# Load environment variables (for local development)
+# Load environment variables
 load_dotenv()
 
-# Configure the Gemini API - UPDATED FOR STREAMLIT SECRETS
+# Configure the Gemini API - UPDATED FOR STREAMLIT CLOUD
 # Try to get API key from Streamlit secrets first, then from environment variables
 if 'GEMINI_API_KEY' in st.secrets:
     api_key = st.secrets['GEMINI_API_KEY']
-    st.success("✅ API key loaded from Streamlit secrets")
 else:
     # Fallback to environment variable for local development
     api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        st.success("✅ API key loaded from environment variable")
 
 if not api_key:
     st.error("""
@@ -294,9 +293,8 @@ if not api_key:
     st.stop()
 
 try:
-    # Configure the API - using the standard approach
+    # Configure the API
     genai.configure(api_key=api_key)
-    st.success("✅ Gemini API configured successfully!")
 except Exception as e:
     st.error(f"Failed to configure Gemini API: {e}")
     st.stop()
@@ -323,13 +321,16 @@ if 'current_analysis_summary' not in st.session_state: # NEW: To hold analysis f
     st.session_state.current_analysis_summary = ""
 if 'presentation_prompt' not in st.session_state: # NEW: Store custom presentation prompt
     st.session_state.presentation_prompt = ""
+if 'hypotheses_generated' not in st.session_state:
+    st.session_state.hypotheses_generated = []
+if 'prioritization_matrix' not in st.session_state:
+    st.session_state.prioritization_matrix = None
 
 
 # --- Consolidated Gemini Helper Function with Structured Output ---
 def get_gemini_response(prompt_text, model_name='gemini-pro', response_schema=None, files=None):
     """A robust helper function to call the Gemini API with optional files and structured output."""
     try:
-        # For older versions, use the standard generate_content approach
         model = genai.GenerativeModel(model_name)
         
         # Prepare contents
@@ -337,13 +338,17 @@ def get_gemini_response(prompt_text, model_name='gemini-pro', response_schema=No
         
         response = model.generate_content(contents)
         
-        # For structured output, we'll need to parse the response text
+        # For structured output, try to parse JSON
         if response_schema:
             try:
-                # Try to parse JSON from the response
-                return json.loads(response.text)
+                # Try to extract JSON from response
+                json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                else:
+                    # If structured output fails, return the text
+                    return {"text": response.text}
             except json.JSONDecodeError:
-                # If it's not JSON, return the text as is
                 return {"text": response.text}
         
         return response.text
@@ -448,7 +453,7 @@ def generate_presentation_slides(analysis_content: str, custom_prompt: str = Non
     else:
         final_prompt = base_prompt.format(analysis_content=analysis_content)
     
-    with st.spinner("Generating bespoke presentation code with Gemini..."):
+    with st.spinner("Generating bespoke presentation code with Gemini Pro..."):
         # Use the powerful model for this creative task
         full_response = get_gemini_response(final_prompt, 'gemini-pro') 
         
@@ -471,11 +476,10 @@ def generate_presentation_slides(analysis_content: str, custom_prompt: str = Non
     return codes
 
 
-# --- Chat Functionality (simplified for compatibility) ---
+# --- Chat Functionality ---
 def initialize_chat():
     """Initialize a new chat session"""
     try:
-        # Use standard model for chat
         model = genai.GenerativeModel('gemini-pro')
         st.session_state.current_chat = model.start_chat(history=[])
     except Exception as e:
@@ -523,17 +527,15 @@ def generate_hypotheses(problem_statement):
     if response:
         # Try to extract JSON from response
         try:
-            # Look for JSON pattern in the response
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group())
             else:
                 # If no JSON found, create a simple structure
                 lines = [line.strip() for line in response.split('\n') if line.strip() and not line.strip().startswith(('#', '-', '*'))]
-                hypotheses = [line for line in lines if len(line) > 10][:7]  # Take meaningful lines as hypotheses
+                hypotheses = [line for line in lines if len(line) > 10][:7]
                 return {"hypotheses": hypotheses}
         except:
-            # Fallback: return the text as hypotheses
             return {"hypotheses": [response]}
     return None
 
@@ -578,12 +580,10 @@ def prioritize_recommendations(recommendations):
     response = get_gemini_response(prompt, 'gemini-pro')
     if response:
         try:
-            # Try to extract JSON from response
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group())
             else:
-                # Fallback: create a simple structure
                 lines = [line.strip() for line in recommendations.split('\n') if line.strip()]
                 recommendations_data = []
                 for i, line in enumerate(lines):
@@ -601,7 +601,7 @@ def prioritize_recommendations(recommendations):
     return None
 
 
-# --- Plotting Function (Modified for Pydantic output) ---
+# --- Plotting Function ---
 def create_prioritization_plot(recommendations_data):
     """Create a 2x2 prioritization matrix visualization from structured data."""
     if not recommendations_data:
@@ -618,7 +618,6 @@ def create_prioritization_plot(recommendations_data):
     impact_map = {'Low': 1, 'Medium': 2, 'High': 3}
     point_index = 1 
 
-    # Ensure recommendations_data is a list of dictionaries
     for rec in recommendations_data:
         rec_dict = rec if isinstance(rec, dict) else rec
         
@@ -645,7 +644,6 @@ def create_prioritization_plot(recommendations_data):
         categories[category]['hover'].append(f"#{point_index}: {text}<br>Impact: {impact_str}<br>Effort: {effort_str}")
         point_index += 1
     
-    # Plotting setup remains the same
     fig = go.Figure()
     colors = {'Quick Wins': 'green', 'Major Projects': 'blue', 'Fill-ins': 'orange', 'Avoid': 'red'}
     
@@ -686,7 +684,7 @@ def create_prioritization_plot(recommendations_data):
     return fig
 
 
-# --- Analysis Functions (remain mostly the same) ---
+# --- Analysis Functions ---
 def get_advanced_analysis(context, query, perspective="realist"):
     """Advanced analysis with multiple thinking frameworks."""
     perspective_prompts = {
@@ -734,19 +732,16 @@ def generate_multiple_perspectives(context, query):
     return results
 
 
-# --- File Processing Functions (Simplified for compatibility) ---
-
+# --- File Processing Functions ---
 def extract_pdf_text_and_part(uploaded_file):
     """Extracts text for context."""
     text = ""
     try:
-        # Reset file pointer to the beginning for PyPDF2
         uploaded_file.seek(0)
         pdf_reader = PyPDF2.PdfReader(uploaded_file)
         for page in pdf_reader.pages:
             text += page.extract_text() if page.extract_text() else ""
-        
-        return text, None  # Return None for part in simplified version
+        return text, None
     except Exception as e:
         st.error(f"Error reading PDF: {e}")
         return None, None
@@ -754,14 +749,10 @@ def extract_pdf_text_and_part(uploaded_file):
 def process_csv_data(uploaded_file):
     """Process CSV data and return DataFrame, summary."""
     try:
-        # Reset file pointer to the beginning for pandas
         uploaded_file.seek(0)
         df = pd.read_csv(uploaded_file)
-        
-        # Create a text summary for the AI to ingest
         data_summary = f"Dataset columns: {list(df.columns)}\nData Head:\n{df.head().to_string()}"
-        
-        return df, None, data_summary  # Return None for part in simplified version
+        return df, None, data_summary
     except Exception as e:
         st.error(f"Error processing CSV: {e}")
         return None, None, None
@@ -776,7 +767,6 @@ def display_presentation_output():
     with st.expander("🎨 Customize Presentation Generation", expanded=False):
         st.markdown("**Customize how the AI generates your presentation:**")
         
-        # Option 1: Use default prompt
         use_custom = st.checkbox("Use custom presentation prompt", value=False)
         
         if use_custom:
@@ -811,7 +801,6 @@ Generate complete HTML, CSS, and JavaScript code for an interactive slide deck."
                         st.session_state.presentation_prompt if st.session_state.presentation_prompt else None
                     )
                     if slide_code:
-                        # Combine and display
                         full_html = f"""
                         <!DOCTYPE html>
                         <html>
@@ -866,12 +855,12 @@ st.markdown("""
 # --- Sidebar Navigation ---
 st.sidebar.title("Navigation")
 
-# NEW: Tool Grouping for better UX
+# Tool Grouping for better UX
 tool_group = st.sidebar.radio(
     "Choose Project Phase:",
     ["1. Project Structuring", "2. Deep Analysis & Data", "3. Prioritization & Delivery", "4. Live Consultation"],
     key="tool_group_choice",
-    on_change=lambda: st.session_state.update(generated_presentation=None, current_analysis_summary="") # Clear presentation on tool change
+    on_change=lambda: st.session_state.update(generated_presentation=None, current_analysis_summary="")
 )
 
 tool_map = {
@@ -915,7 +904,6 @@ if actual_tool == "Problem Structuring Workbench":
                 if issue_tree:
                     st.markdown("### 🎯 Structured Issue Tree")
                     st.markdown(issue_tree)
-                    # Store for context and potential presentation
                     st.session_state.current_analysis_summary = f"Problem: {problem}\n\nIssue Tree Analysis:\n{issue_tree}"
                 else:
                     st.error("Failed to generate issue tree. Please try again.")
@@ -939,11 +927,11 @@ elif actual_tool == "Hypothesis Testing":
                     hypotheses_result = generate_hypotheses(problem_for_hypotheses)
                     if hypotheses_result and 'hypotheses' in hypotheses_result:
                         st.markdown("### 🎯 Generated Hypotheses")
-                        for i, hypothesis in enumerate(hypotheses_result['hypotheses'], 1):
+                        st.session_state.hypotheses_generated = hypotheses_result['hypotheses']
+                        for i, hypothesis in enumerate(st.session_state.hypotheses_generated, 1):
                             st.markdown(f"**Hypothesis {i}:** {hypothesis}")
                         
-                        # Store for context
-                        st.session_state.current_analysis_summary = f"Problem: {problem_for_hypotheses}\n\nGenerated Hypotheses:\n" + "\n".join([f"{i}. {h}" for i, h in enumerate(hypotheses_result['hypotheses'], 1)])
+                        st.session_state.current_analysis_summary = f"Problem: {problem_for_hypotheses}\n\nGenerated Hypotheses:\n" + "\n".join([f"{i}. {h}" for i, h in enumerate(st.session_state.hypotheses_generated, 1)])
                     else:
                         st.error("Failed to generate hypotheses. Please try again.")
             else:
@@ -951,8 +939,13 @@ elif actual_tool == "Hypothesis Testing":
     
     with tab2:
         st.subheader("Test Existing Hypotheses")
-        hypothesis_to_test = st.text_area("Hypothesis to test:", height=60,
-                                         placeholder="e.g., 'Customers are churning due to poor onboarding experience'")
+        
+        # Use generated hypotheses if available, or allow custom input
+        if st.session_state.hypotheses_generated:
+            hypothesis_to_test = st.selectbox("Select a hypothesis to test:", st.session_state.hypotheses_generated)
+        else:
+            hypothesis_to_test = st.text_area("Hypothesis to test:", height=60,
+                                             placeholder="e.g., 'Customers are churning due to poor onboarding experience'")
         
         data_context = st.text_area("Available data/context for testing:", height=100,
                                    placeholder="e.g., 'Survey data shows 40% of churned customers mentioned onboarding. Support tickets show increased onboarding questions.'")
@@ -964,8 +957,6 @@ elif actual_tool == "Hypothesis Testing":
                     if test_result:
                         st.markdown("### 📊 Hypothesis Test Results")
                         st.markdown(test_result)
-                        
-                        # Store for context
                         st.session_state.current_analysis_summary = f"Hypothesis: {hypothesis_to_test}\n\nData Context: {data_context}\n\nTest Results:\n{test_result}"
                     else:
                         st.error("Failed to test hypothesis. Please try again.")
@@ -990,7 +981,6 @@ elif actual_tool == "Multi-Perspective Analysis":
                 if perspectives:
                     st.markdown("### 📋 Multi-Perspective Analysis Results")
                     
-                    # Create tabs for each perspective
                     tabs = st.tabs([f"🧠 {p.capitalize()}" for p in perspectives.keys()])
                     
                     all_analysis = ""
@@ -999,7 +989,6 @@ elif actual_tool == "Multi-Perspective Analysis":
                             st.markdown(analysis)
                             all_analysis += f"**{perspective.upper()} PERSPECTIVE:**\n{analysis}\n\n"
                     
-                    # Store comprehensive analysis for presentation
                     st.session_state.current_analysis_summary = f"Context: {analysis_context}\n\nQuery: {analysis_query}\n\n{all_analysis}"
                 else:
                     st.error("Failed to generate analysis. Please try again.")
@@ -1019,18 +1008,17 @@ elif actual_tool == "Strategic Prioritization":
                 prioritization_result = prioritize_recommendations(recommendations_input)
                 
                 if prioritization_result and 'recommendations_data' in prioritization_result:
-                    # Display the visualization
+                    st.session_state.prioritization_matrix = prioritization_result
+                    
                     st.markdown("### 📊 Prioritization Matrix")
                     fig = create_prioritization_plot(prioritization_result['recommendations_data'])
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # Display the detailed analysis
                     if 'textual_analysis' in prioritization_result:
                         st.markdown("### 📝 Strategic Analysis")
                         st.markdown(prioritization_result['textual_analysis'])
                     
-                    # Store for context and presentation
                     recommendations_text = "\n".join([f"- {r['recommendation']} (Impact: {r['impact']}, Effort: {r['effort']})" 
                                                      for r in prioritization_result['recommendations_data']])
                     st.session_state.current_analysis_summary = f"Recommendations Prioritization:\n{recommendations_text}\n\nAnalysis:\n{prioritization_result.get('textual_analysis', '')}"
@@ -1043,32 +1031,25 @@ elif actual_tool == "Live Chat Consultation":
     st.header("💬 Live Chat Consultation")
     st.markdown("Real-time conversation with the AI consultant for open-ended discussion.")
     
-    # Initialize chat if not already done
     if st.session_state.current_chat is None:
         initialize_chat()
     
-    # Display chat history
     for message in st.session_state.conversation_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
     
-    # Chat input
     if prompt := st.chat_input("Ask your strategic question..."):
-        # Add user message to chat
         st.session_state.conversation_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Get AI response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 response = send_chat_message(prompt)
                 if response:
                     st.markdown(response)
                     st.session_state.conversation_history.append({"role": "assistant", "content": response})
-                    
-                    # Store the conversation for context
-                    st.session_state.current_analysis_summary = f"Live Chat Consultation Summary:\n\n" + "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.conversation_history[-6:]])  # Last 6 messages
+                    st.session_state.current_analysis_summary = f"Live Chat Consultation Summary:\n\n" + "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.conversation_history[-6:]])
                 else:
                     st.error("Failed to get response. Please try again.")
 
@@ -1104,7 +1085,6 @@ elif actual_tool == "Document Intelligence":
                     st.success(f"✅ Extracted {len(text)} characters from {file_name}")
                     st.session_state.uploaded_data[file_name] = text
                     
-                    # Show preview
                     with st.expander("📖 Document Preview"):
                         st.text(text[:1000] + "..." if len(text) > 1000 else text)
         
@@ -1115,7 +1095,6 @@ elif actual_tool == "Document Intelligence":
                     st.success(f"✅ Processed {len(df)} rows from {file_name}")
                     st.session_state.uploaded_data[file_name] = df
                     
-                    # Show preview
                     with st.expander("📊 Data Preview"):
                         st.dataframe(df.head())
                         st.markdown(f"**Data Summary:** {summary}")
@@ -1127,7 +1106,6 @@ elif actual_tool == "Data Analysis Suite":
     if st.session_state.uploaded_data:
         st.success(f"✅ Loaded {len(st.session_state.uploaded_data)} data source(s)")
         
-        # Simple analysis example
         for name, data in st.session_state.uploaded_data.items():
             if isinstance(data, pd.DataFrame):
                 st.subheader(f"Analysis: {name}")
@@ -1147,6 +1125,17 @@ elif actual_tool == "Data Analysis Suite":
                         'Null': data.isnull().sum()
                     })
                     st.dataframe(col_info)
+                
+                # Simple visualization
+                st.subheader("📊 Quick Visualizations")
+                numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+                if len(numeric_cols) >= 2:
+                    x_col = st.selectbox("X-axis", numeric_cols, key=f"x_{name}")
+                    y_col = st.selectbox("Y-axis", numeric_cols, key=f"y_{name}")
+                    
+                    if st.button("Generate Scatter Plot", key=f"plot_{name}"):
+                        fig = px.scatter(data, x=x_col, y=y_col, title=f"{y_col} vs {x_col}")
+                        st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("📁 Upload documents in the Document Intelligence tab to enable data analysis.")
 
@@ -1178,8 +1167,6 @@ elif actual_tool == "Strategic Frameworks":
                 if analysis:
                     st.markdown(f"### 🎯 {framework} Analysis")
                     st.markdown(analysis)
-                    
-                    # Store for context
                     st.session_state.current_analysis_summary = f"Framework: {framework}\n\nContext: {business_context}\n\nAnalysis:\n{analysis}"
                 else:
                     st.error(f"Failed to generate {framework} analysis. Please try again.")
