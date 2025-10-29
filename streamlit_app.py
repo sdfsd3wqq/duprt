@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 from google.generativeai import types
-from google.generativeai.errors import APIError
+from google.api_core.exceptions import APIError
 import os
 import PyPDF2
 import pandas as pd
