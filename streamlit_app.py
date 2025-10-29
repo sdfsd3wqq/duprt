@@ -265,19 +265,38 @@ def parse_code(full_response: str) -> dict[str, str]:
 # --- END of Ported Logic ---
 
 
-# Load environment variables
+# Load environment variables (for local development)
 load_dotenv()
 
-# Configure the Gemini API
-api_key = os.getenv("GEMINI_API_KEY")
+# Configure the Gemini API - UPDATED FOR STREAMLIT SECRETS
+# Try to get API key from Streamlit secrets first, then from environment variables
+if 'GEMINI_API_KEY' in st.secrets:
+    api_key = st.secrets['GEMINI_API_KEY']
+    st.success("✅ API key loaded from Streamlit secrets")
+else:
+    # Fallback to environment variable for local development
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        st.success("✅ API key loaded from environment variable")
+
 if not api_key:
-    # Use st.error and stop as before
-    st.error("GEMINI_API_KEY not found. Please create a .env file and add it.")
+    st.error("""
+    ❌ GEMINI_API_KEY not found. 
+    
+    Please add your Gemini API key to Streamlit Secrets:
+    1. Go to your app dashboard
+    2. Click on "Settings" ⚙️
+    3. Go to "Secrets" tab
+    4. Add: `GEMINI_API_KEY = "your_actual_api_key_here"`
+    
+    For local development, create a .env file with: GEMINI_API_KEY=your_key
+    """)
     st.stop()
 
 try:
     # Configure the API - using the standard approach
     genai.configure(api_key=api_key)
+    st.success("✅ Gemini API configured successfully!")
 except Exception as e:
     st.error(f"Failed to configure Gemini API: {e}")
     st.stop()
